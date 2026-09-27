@@ -4,20 +4,34 @@ on:
   workflow_dispatch:
     inputs:
       singbox_ref:
-        description: '编译版本/分支 (例如: main, v1.11.0)'
+        description: '指定编译版本/Tag (如 v1.11.0，留空则自动获取官方最新 Release)'
         required: false
-        default: 'main'
+        default: ''
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Get Latest sing-box Release Tag
+        id: get_tag
+        run: |
+          # 如果用户输入了版本号则直接使用，否则通过 GitHub API 获取官方最新 Release Tag
+          INPUT_TAG="${{ github.event.inputs.singbox_ref }}"
+          if [ -z "$INPUT_TAG" ]; then
+            LATEST_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+            echo "TAG_NAME=$LATEST_TAG" >> $GITHUB_ENV
+            echo "已自动获取官方最新 Release: $LATEST_TAG"
+          else
+            echo "TAG_NAME=$INPUT_TAG" >> $GITHUB_ENV
+            echo "使用指定的版本/分支: $INPUT_TAG"
+          fi
+
       - name: Checkout sing-box
         uses: actions/checkout@v4
         with:
           repository: SagerNet/sing-box
-          ref: ${{ github.event.inputs.singbox_ref || 'main' }}
+          ref: ${{ env.TAG_NAME }}
           fetch-depth: 0
 
       - name: Set up Go
@@ -33,20 +47,21 @@ jobs:
           GOARM64: v8.0
           CGO_ENABLED: 0
         run: |
+          # 处理版本号字符串注入，确保 sing-box version 输出正确版本
+          RAW_VERSION="${{ env.TAG_NAME }}"
+          CLEAN_VERSION="${RAW_VERSION#v}" # 移除前缀 v
+
+          # 编译命令（已剔除 UPX，通过 ldflags/gcflags 做到未压缩状态下的极致精简）
           go build -v \
             -trimpath \
+            -gcflags="all=-l -B" \
             -tags "with_utls" \
-            -ldflags "-s -w -buildid=" \
+            -ldflags "-s -w -buildid= -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${CLEAN_VERSION}" \
             -o sing-box-tproxy-aarch64 \
             ./cmd/sing-box
-
-      - name: Compress with UPX
-        run: |
-          sudo apt-get update && sudo apt-get install -y upx
-          upx --best --lzma sing-box-tproxy-aarch64 || true
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sing-box-tproxy-latest-aarch64
+          name: sing-box-tproxy-${{ env.TAG_NAME }}-aarch64
           path: sing-box-tproxy-aarch64
